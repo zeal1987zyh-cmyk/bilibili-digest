@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "B站深度阅读助手 (Bilibili Digest)",
+  "version": "1.0.0",
+  "description": "把 B 站视频变成深度学习资源：字幕文稿、AI 概览、时间戳笔记、双语对照、无字幕视频本地语音转写。",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage", "tabs", "scripting"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self'; connect-src *; img-src 'self' data: blob: https://*.hdslb.com https://*.bilibili.com; media-src blob:; default-src 'self'"
+  },
+  "host_permissions": [
+    "https://api.bilibili.com/*",
+    "https://*.bilibili.com/*",
+    "https://*.hdslb.com/*",
+    "https://api.deepseek.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "打开 B站深度阅读助手",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["*://www.bilibili.com/*", "*://bilibili.com/*"],
+      "js": ["md5.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

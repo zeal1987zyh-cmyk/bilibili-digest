@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设置 · B站深度阅读助手</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <div class="brand">
+        <span class="brand-logo">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path fill="currentColor" d="M8 5.5 12 2l4 3.5h-2.5V7h-3V5.5H8Zm-3.5 3A2.5 2.5 0 0 0 2 11v6a2.5 2.5 0 0 0 2.5 2.5H6l1.5 2 1.5-2h6l1.5 2 1.5-2h1.5a2.5 2.5 0 0 0 2.5-2.5v-6a2.5 2.5 0 0 0-2.5-2.5h-13Zm0 2h13a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H4.5a.5.5 0 0 1-.5-.5v-6a.5.5 0 0 1 .5-.5ZM6.75 12a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm10.5 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/>
+          </svg>
+        </span>
+        <div>
+          <h1>B站深度阅读助手</h1>
+          <p class="subtitle">设置页 · 配置 AI 服务后即可使用</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-body">
+
+      <section class="card">
+        <h2>AI 服务配置（BYOK 自带密钥）</h2>
+        <p class="desc">本扩展使用你自己的 DeepSeek API Key 完成概览、翻译、解释与笔记润色。密钥只保存在浏览器本地（chrome.storage.local），不会上传到任何第三方服务器。</p>
+
+        <div class="field">
+          <label for="apiKey">DeepSeek API Key <span class="req">*</span></label>
+          <input type="password" id="apiKey" class="input" placeholder="sk-..." autocomplete="off" spellcheck="false">
+          <p class="hint">在 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com/api_keys</a> 创建，以 sk- 开头</p>
+        </div>
+
+        <div class="field">
+          <label for="baseUrl">API 接口地址</label>
+          <input type="text" id="baseUrl" class="input" placeholder="https://api.deepseek.com" spellcheck="false">
+          <p class="hint">兼容 OpenAI 格式的接口均可填写，例如 DeepSeek 官方地址</p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="model">模型名称</label>
+            <input type="text" id="model" class="input" list="model-list" placeholder="deepseek-v4-flash" spellcheck="false">
+            <datalist id="model-list">
+              <option value="deepseek-v4-flash"></option>
+              <option value="deepseek-v4-pro"></option>
+            </datalist>
+            <p class="hint">deepseek-v4-flash 速度快、性价比高，推荐日常使用（旧名 deepseek-chat 已于 2026-07-24 退役）</p>
+          </div>
+          <div class="field">
+            <label for="temperature">创意度（0~1）</label>
+            <input type="number" id="temperature" class="input" min="0" max="1" step="0.1" placeholder="0.5">
+            <p class="hint">越低越严谨，越高越发散。建议保持 0.4~0.6</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="actions">
+        <button id="btn-test" class="btn ghost">测试连接</button>
+        <span id="test-result" class="test-result"></span>
+        <div class="spacer"></div>
+        <button id="btn-reset" class="btn danger-ghost">恢复默认</button>
+        <button id="btn-save" class="btn primary">保存设置</button>
+      </section>
+
+      <section class="card tips">
+        <h2>使用提示</h2>
+        <ul>
+          <li>在 B 站视频页面点击扩展图标即可打开侧边栏。</li>
+          <li>需要视频带字幕（UP 主上传的 CC 字幕或开启的 AI 字幕）。</li>
+          <li>「AI 概览」会把整段文稿发给 AI 做一次分析；翻译按分段渐进进行，可随时停止。</li>
+          <li>费用参考：生成一次约 20 分钟视频的概览 + 全文翻译，一般不到 0.1 元。</li>
+        </ul>
+      </section>
+
+      <footer class="page-footer">B站深度阅读助手 · 个人学习工具 · 与哔哩哔哩官方无关</footer>
+    </main>
+  </div>
+
+  <script src="settings.js"></script>
+  <script src="prompts.js"></script>
+  <script src="api.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

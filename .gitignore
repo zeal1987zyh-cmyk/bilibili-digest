@@ -1,0 +1,18 @@
+# ===== 操作系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# ===== 打包产物（本地构建的 zip，不入库）=====
+*.zip
+
+# ===== Node 依赖（诊断脚本 test-api.js 仅用 Node 内置 fetch，无需 npm 依赖）=====
+node_modules/
+
+# ===== 本地密钥 / 个人配置（如有）=====
+.env
+*.local
+
+# 注意：libs/transformers.min.js 是扩展运行所需的本地推理库，必须入库。

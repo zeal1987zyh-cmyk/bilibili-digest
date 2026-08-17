@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B站深度阅读助手</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-logo">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path fill="currentColor" d="M8 5.5 12 2l4 3.5h-2.5V7h-3V5.5H8Zm-3.5 3A2.5 2.5 0 0 0 2 11v6a2.5 2.5 0 0 0 2.5 2.5H6l1.5 2 1.5-2h6l1.5 2 1.5-2h1.5a2.5 2.5 0 0 0 2.5-2.5v-6a2.5 2.5 0 0 0-2.5-2.5h-13Zm0 2h13a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H4.5a.5.5 0 0 1-.5-.5v-6a.5.5 0 0 1 .5-.5ZM6.75 12a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm10.5 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z"/>
+        </svg>
+      </span>
+      <span class="brand-text">B站深度阅读</span>
+    </div>
+    <button id="btn-settings" class="icon-btn" title="设置" aria-label="设置">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+        <path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm-8.9 1a8.9 8.9 0 0 1 .15-1.5L1.4 8.2l2-3.4 2.1.9a8.8 8.8 0 0 1 2.6-1.5L8.6 2h4l.5 2.2c.96.32 1.8.83 2.6 1.5l2.1-.9 2 3.4-1.85 1.5c.1.5.15 1 .15 1.5s-.05 1-.15 1.5l1.85 1.5-2 3.4-2.1-.9a8.8 8.8 0 0 1-2.6 1.5L12.6 22h-4l-.5-2.2a8.8 8.8 0 0 1-2.6-1.5l-2.1.9-2-3.4 1.85-1.5A8.9 8.9 0 0 1 3.1 11Z"/>
+      </svg>
+    </button>
+  </header>
+
+  <main id="app">
+
+    <!-- 空状态 -->
+    <section id="empty-state" class="state hidden">
+      <div class="state-icon">
+        <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">
+          <path fill="currentColor" d="M4 4.5A2.5 2.5 0 0 1 6.5 2H12v6H4V4.5ZM14 2h3.5A2.5 2.5 0 0 1 20 4.5V8h-6V2Zm6 8v9.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 19.5V10h16Zm-7.5 3-5 3v2l5 3V13Z"/>
+        </svg>
+      </div>
+      <p class="state-title">请先打开一个 B 站视频页面</p>
+      <p class="state-sub">支持 <code>www.bilibili.com/video/BV...</code><br>且带有字幕（CC 或 AI 字幕）的视频</p>
+    </section>
+
+    <!-- 加载状态 -->
+    <section id="loading-state" class="state hidden">
+      <div class="spinner"></div>
+      <p id="loading-text" class="state-title">正在读取视频信息…</p>
+    </section>
+
+    <!-- 错误状态 -->
+    <section id="error-state" class="state hidden">
+      <div class="state-icon warn">
+        <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">
+          <path fill="currentColor" d="M12 2 1 21h22L12 2Zm1 14h-2v2h2v-2Zm0-7h-2v5h2V9Z"/>
+        </svg>
+      </div>
+      <p id="error-text" class="state-title"></p>
+      <p class="state-sub">如果视频没有字幕，可以尝试切换到带字幕的视频，或稍后重试。</p>
+    </section>
+
+    <!-- 主视图 -->
+    <section id="video-view" class="hidden">
+      <div class="video-card">
+        <img id="video-thumb" class="video-thumb" alt="视频封面" referrerpolicy="no-referrer">
+        <div class="video-meta">
+          <h2 id="video-title" class="video-title"></h2>
+          <div class="video-sub">
+            <span id="video-up" class="video-up"></span>
+            <span id="video-lang" class="chip"></span>
+          </div>
+        </div>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" role="tab" data-tab="overview">概览</button>
+        <button class="tab" role="tab" data-tab="transcript">文稿</button>
+        <button class="tab" role="tab" data-tab="notes">笔记 <span id="note-count" class="badge hidden"></span></button>
+      </nav>
+
+      <!-- 概览 -->
+      <div id="tab-overview" class="tab-panel active" role="tabpanel">
+        <div class="panel-toolbar">
+          <button id="btn-generate" class="btn primary">生成 AI 概览</button>
+          <button id="btn-regenerate" class="btn ghost hidden">重新生成</button>
+          <button id="btn-export-overview" class="btn ghost small" disabled>导出</button>
+          <span id="overview-status" class="inline-status"></span>
+        </div>
+        <div id="overview-content" class="overview-content"></div>
+
+        <!-- 请求诊断面板：实时展示生成耗时、DeepSeek 请求状态与返回值 -->
+        <details id="diag-panel" class="diag-panel" open>
+          <summary class="diag-head">
+            <span>请求诊断</span>
+            <span id="diag-timer" class="diag-timer">0.0s</span>
+          </summary>
+          <div id="diag-log" class="diag-log"></div>
+          <div id="diag-cost" class="diag-cost hidden"></div>
+          <div class="diag-preview">
+            <div class="diag-preview-label">DeepSeek 返回值预览</div>
+            <pre id="diag-preview" class="diag-preview-text">（未开始）</pre>
+          </div>
+        </details>
+      </div>
+
+      <!-- 文稿 -->
+      <div id="tab-transcript" class="tab-panel" role="tabpanel">
+        <div class="panel-toolbar transcript-toolbar">
+          <div class="seg-control" role="group" aria-label="视图切换">
+            <button class="seg active" data-mode="original">原文</button>
+            <button class="seg" data-mode="bilingual">双语</button>
+            <button class="seg" data-mode="zh">中文</button>
+          </div>
+          <div class="toolbar-actions">
+            <button id="btn-transcribe" class="btn ghost small">🎙 语音转写</button>
+            <button id="btn-translate" class="btn ghost small">翻译全文</button>
+            <button id="btn-explain" class="btn ghost small">解释选中</button>
+            <button id="btn-export-transcript" class="btn ghost small">导出文稿</button>
+          </div>
+        </div>
+        <div id="transcribe-box" class="transcribe-box hidden">
+          <div class="transcribe-row">
+            <span id="transcribe-status" class="transcribe-status"></span>
+            <button id="btn-transcribe-stop" class="btn ghost small hidden">停止并转写</button>
+          </div>
+          <div id="transcribe-progress" class="transcribe-progress hidden">
+            <div class="tp-bar"><div id="tp-fill" class="tp-fill"></div></div>
+            <span id="tp-text" class="tp-text"></span>
+          </div>
+        </div>
+        <div id="transcript-body" class="transcript-body"></div>
+        <div id="explain-panel" class="explain-panel hidden">
+          <div class="explain-head">
+            <span>AI 解释</span>
+            <button id="btn-explain-close" class="icon-btn small" title="关闭">×</button>
+          </div>
+          <div id="explain-content" class="explain-content"></div>
+        </div>
+      </div>
+
+      <!-- 笔记 -->
+      <div id="tab-notes" class="tab-panel" role="tabpanel">
+        <div class="panel-toolbar">
+          <button id="btn-add-note" class="btn primary small">记录当前时刻笔记</button>
+          <button id="btn-export-notes" class="btn ghost small">导出 Markdown</button>
+        </div>
+        <div id="notes-body" class="notes-body"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer id="status-bar" class="status hidden"><span class="status-text"></span></footer>
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="settings.js"></script>
+  <script src="prompts.js"></script>
+  <script src="api.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

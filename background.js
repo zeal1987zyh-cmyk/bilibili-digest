@@ -59,16 +59,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       world: 'MAIN',
       func: () => {
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+        function pickFirst(obj, paths) {
+          for (const p of paths) {
+            try {
+              let cur = obj;
+              for (const k of p) {
+                if (cur == null) break;
+                cur = cur[k];
+              }
+              if (cur) return cur;
+            } catch (e) {}
+          }
+          return null;
+        }
+
+        function cleanPic(url) {
+          if (!url) return '';
+          return String(url).replace(/^http:\/\//, 'https://').replace(/^\/\//, 'https://').split('@')[0];
+        }
+
         return (async () => {
           const payload = { source: 'bili-digest-extract', subtitles: null, videoInfo: null, playinfo: null };
-          const deadline = Date.now() + 2000;
+          const deadline = Date.now() + 2500;
           while (Date.now() < deadline) {
-            // 1) window.__playinfo__
+            // 1) window.__playinfo__ — 尝试多种字幕路径
             try {
               const pi = window.__playinfo__;
               if (pi) {
                 payload.playinfo = pi;
-                const subs = pi && pi.data && pi.data.subtitle && pi.data.subtitle.subtitles;
+                const subs = pickFirst(pi, [
+                  ['data', 'subtitle', 'subtitles'],
+                  ['subtitle', 'subtitles'],
+                  ['data', 'video_subtitle'],
+                  ['video_subtitle']
+                ]);
                 if (subs && subs.length) payload.subtitles = subs;
               }
             } catch (e) {}
@@ -77,27 +102,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             try {
               const st = window.__INITIAL_STATE__;
               if (st) {
-                const vi = st.videoInfo || {};
+                const vi = st.videoInfo || st.videoData || {};
                 if (vi.aid && vi.bvid && vi.cid) {
                   payload.videoInfo = {
                     aid: vi.aid,
                     bvid: vi.bvid,
                     cid: vi.cid,
                     title: vi.title || '',
-                    pic: vi.pic || (vi.cover && vi.cover.split('@')[0]) || '',
+                    pic: cleanPic(vi.pic || vi.cover),
                     up: (vi.up && vi.up.name) || (vi.owner && vi.owner.name) || '',
                     duration: vi.duration || 0,
                     pages: (vi.pages && vi.pages.length) || 1
                   };
                 }
                 if (!payload.subtitles) {
-                  const subInfo = st.videoInfo && st.videoInfo.subtitle;
+                  const subInfo = pickFirst(st, [
+                    ['videoInfo', 'subtitle'],
+                    ['videoData', 'subtitle'],
+                    ['epInfo', 'subtitle']
+                  ]);
                   if (subInfo && subInfo.subtitles && subInfo.subtitles.length) {
                     payload.subtitles = subInfo.subtitles;
                   }
                 }
               }
             } catch (e) {}
+
+            // 3) 页面 script 标签兜底（部分新版页面把 playinfo 放在 <script id="__playinfo__">）
+            if (!payload.playinfo) {
+              try {
+                const el = document.getElementById('__playinfo__');
+                if (el && el.textContent) {
+                  const pi = JSON.parse(el.textContent);
+                  if (pi) {
+                    payload.playinfo = pi;
+                    const subs = pickFirst(pi, [
+                      ['data', 'subtitle', 'subtitles'],
+                      ['subtitle', 'subtitles']
+                    ]);
+                    if (subs && subs.length) payload.subtitles = subs;
+                  }
+                }
+              } catch (e) {}
+            }
 
             if (payload.playinfo || payload.videoInfo) break;
             await wait(200);
@@ -133,7 +180,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
 
-    fetch(url, { credentials: 'include' })
+    const headers = {};
+    if (msg.referer) headers['Referer'] = msg.referer;
+
+    fetch(url, { credentials: 'include', headers: headers })
       .then(async (res) => {
         if (!res.ok) {
           sendResponse({ ok: false, error: 'HTTP ' + res.status });

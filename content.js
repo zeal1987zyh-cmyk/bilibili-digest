@@ -41,6 +41,11 @@
     return Number.isFinite(p) && p >= 1 ? p : 1;
   }
 
+  function cleanPic(url) {
+    if (!url) return '';
+    return String(url).replace(/^http:\/\//, 'https://').replace(/^\/\//, 'https://').split('@')[0];
+  }
+
   /* =========================================================
    * 方法 1：从页面内嵌数据提取（__playinfo__ + __INITIAL_STATE__）
    * 零网络请求，最可靠
@@ -77,7 +82,7 @@
   function bgFetch(url) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { type: 'digest:bg-fetch', url: url },
+        { type: 'digest:bg-fetch', url: url, referer: getBiliReferer() },
         (resp) => {
           if (chrome.runtime.lastError) {
             reject(new Error('后台请求失败: ' + chrome.runtime.lastError.message));
@@ -98,11 +103,20 @@
   }
 
   /* =========================================================
-   * 方法 3：直接 fetch（兜底）
+   * 方法 3：直接 fetch（优先用于 B站 API，因为 content script 在页面上下文中，
+   * 能自动带上用户的 B站登录 cookie；B站字幕接口匿名请求常返回空列表）
    * ========================================================= */
 
+  function getBiliReferer() {
+    const bvid = getBvid();
+    return 'https://www.bilibili.com/video/' + (bvid || '');
+  }
+
   async function directFetch(url) {
-    const res = await fetch(url, { credentials: 'include' });
+    const res = await fetch(url, {
+      credentials: 'include',
+      headers: { 'Referer': getBiliReferer() }
+    });
     if (!res.ok) throw new Error('网络请求失败 (HTTP ' + res.status + ')');
     return res.json();
   }
@@ -125,7 +139,7 @@
             const pg = pages[Math.min(p, pages.length) - 1] || {};
             return {
               bvid: j.data.bvid, aid: j.data.aid, title: j.data.title,
-              pic: j.data.pic, up: (j.data.owner && j.data.owner.name) || '',
+              pic: cleanPic(j.data.pic), up: (j.data.owner && j.data.owner.name) || '',
               desc: j.data.desc || '', cid: pg.cid, part: pg.part || '',
               duration: j.data.duration || 0, pages: pages.length,
               p: Math.min(p, pages.length)
@@ -150,7 +164,7 @@
     const pages = d.pages || [];
     const pg = pages[Math.min(p, pages.length) - 1] || { cid: d.cid, part: '' };
     return {
-      bvid: d.bvid, aid: d.aid, title: d.title, pic: d.pic,
+      bvid: d.bvid, aid: d.aid, title: d.title, pic: cleanPic(d.pic),
       up: (d.owner && d.owner.name) || '', desc: d.desc || '',
       cid: pg.cid, part: pg.part || '', duration: d.duration || 0,
       pages: pages.length, p: Math.min(p, pages.length)
@@ -162,21 +176,21 @@
    * ========================================================= */
 
   async function fetchViaBestMethod(url) {
-    // 方法 2：background 中继
+    // 优先直接 fetch：content script 在 B站页面上下文中，能带登录 cookie
     try {
-      const data = await bgFetch(url);
-      log('API 请求成功 (background 中继):', url.slice(0, 80));
+      const data = await directFetch(url);
+      log('API 请求成功 (直接 fetch):', url.slice(0, 80));
       return data;
     } catch (e1) {
-      log('background 中继失败:', e1.message);
-      // 方法 3：直接 fetch 兜底
+      log('直接 fetch 失败:', e1.message);
+      // 降级 background 中继（适用于侧栏直接调用等场景）
       try {
-        const data = await directFetch(url);
-        log('API 请求成功 (直接 fetch):', url.slice(0, 80));
+        const data = await bgFetch(url);
+        log('API 请求成功 (background 中继):', url.slice(0, 80));
         return data;
       } catch (e2) {
-        log('直接 fetch 也失败:', e2.message);
-        throw new Error(e1.message + '；直接请求也失败: ' + e2.message);
+        log('background 中继也失败:', e2.message);
+        throw new Error(e1.message + '；后台中继也失败: ' + e2.message);
       }
     }
   }
@@ -202,7 +216,7 @@
   }
 
   // 通过 API 获取字幕列表
-  async function getSubtitleListViaApi(bvid, cid) {
+  async function getSubtitleListViaApi(bvid, cid, aid) {
     // 先获取 nav 数据（用于 WBI 签名）
     const navJ = await fetchViaBestMethod('https://api.bilibili.com/x/web-interface/nav');
     if (!navJ || navJ.code !== 0) {
@@ -210,14 +224,16 @@
     }
 
     const mixinKey = getWbiMixinKey(navJ);
-    const qs = wbiSign({ bvid: bvid, cid: cid }, mixinKey);
+    const params = { bvid: bvid, cid: cid };
+    if (aid) params.aid = aid;
+    const qs = wbiSign(params, mixinKey);
 
     let j;
     try {
       j = await fetchViaBestMethod('https://api.bilibili.com/x/player/wbi/v2?' + qs);
     } catch (e) {
       log('WBI 接口失败，尝试旧接口:', e.message);
-      j = await fetchViaBestMethod('https://api.bilibili.com/x/player/v2?bvid=' + encodeURIComponent(bvid) + '&cid=' + cid);
+      j = await fetchViaBestMethod('https://api.bilibili.com/x/player/v2?bvid=' + encodeURIComponent(bvid) + '&cid=' + cid + (aid ? '&aid=' + aid : ''));
     }
 
     if (!j || j.code !== 0) {
@@ -232,13 +248,13 @@
   function pickSubtitle(list) {
     if (!list || !list.length) return null;
     const rank = (s) => {
-      const lan = s.lan || '';
+      const lan = String(s.lan || '').toLowerCase();
       let score = 0;
-      if (lan === 'zh-CN' || lan === 'zh-Hans' || lan === 'zh-Hant') score += 100;
+      if (lan === 'zh-cn' || lan === 'zh-hans' || lan === 'zh-hant') score += 100;
       else if (lan === 'zh' || lan.startsWith('zh')) score += 90;
-      else if (lan === 'ai-zh') score += 80;
+      else if (lan === 'ai-zh' || lan === 'ai-zh-cn' || lan === 'zh-hans-ai') score += 80;
       else if (lan.startsWith('ai')) score += 60;
-      else if (lan === 'en') score += 40;
+      else if (lan === 'en' || lan.startsWith('en')) score += 40;
       if (s.ai_status === 0) score += 10;
       return score;
     };
@@ -313,7 +329,7 @@
     if (!subtitle) {
       log('尝试通过 API 获取字幕...');
       try {
-        const subs = await getSubtitleListViaApi(bvid, video.cid);
+        const subs = await getSubtitleListViaApi(bvid, video.cid, video.aid);
         log('API 返回字幕列表:', subs.length, '条');
         const sub = pickSubtitle(subs);
         if (sub) {
@@ -324,7 +340,7 @@
           subtitle = { lan: sub.lan || '', lanDoc: sub.lan_doc || '', ai: !!sub.ai_status, body: body };
           log('字幕加载成功 (API):', subtitle.lan, body.length, '段');
         } else if (subs.length === 0) {
-          errors.push('API 返回字幕列表为空（该视频可能没有 API 可见的字幕）');
+          errors.push('B站 API 未返回字幕。可能原因：1) 该视频未开启字幕；2) 你未登录 B站账号（B站已要求登录才能读取字幕列表）；3) 当前账号无该视频观看权限。可尝试点击「本地语音转写」。');
         }
       } catch (e) {
         errors.push('API 字幕: ' + e.message);

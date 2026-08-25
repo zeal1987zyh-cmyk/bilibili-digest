@@ -163,7 +163,20 @@
       return;
     }
     if (state.subtitle.error) {
-      body.appendChild(el('div', 'transcript-empty', '字幕获取失败：' + state.subtitle.error));
+      const wrap = el('div', 'transcript-empty');
+      const title = el('p', '', '字幕获取失败');
+      const detail = el('p', 'sub-error', state.subtitle.error);
+      detail.style.marginTop = '8px';
+      detail.style.fontSize = '13px';
+      detail.style.lineHeight = '1.6';
+      detail.style.opacity = '0.85';
+      wrap.appendChild(title);
+      wrap.appendChild(detail);
+      const btn = el('button', 'btn primary', '🎙 本地语音转写（无需字幕）');
+      btn.style.marginTop = '14px';
+      btn.addEventListener('click', startTranscribe);
+      wrap.appendChild(btn);
+      body.appendChild(wrap);
       $('#btn-translate').disabled = true;
       $('#btn-export-transcript').disabled = true;
       return;

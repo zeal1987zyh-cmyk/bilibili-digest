@@ -79,9 +79,79 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return String(url).replace(/^http:\/\//, 'https://').replace(/^\/\//, 'https://').split('@')[0];
         }
 
+        // ===== 安装 fetch/XHR hook：捕获播放器自身发起的字幕请求 =====
+        // 这是最可靠的来源——直接拦截播放器加载字幕时用的真实 URL 与正文，
+        // 不需要 API 签名，也不依赖扩展读 cookie。
+        function installHook() {
+          if (window.__biliDigestHookInstalled) return;
+          window.__biliDigestCaptured = window.__biliDigestCaptured || [];
+          try {
+            const origFetch = window.fetch.bind(window);
+            window.fetch = function (input, init) {
+              const url = (typeof input === 'string') ? input : (input && input.url) || '';
+              const p = origFetch(input, init);
+              if (url && /aisubtitle|\/bfs\/ai_subtitle\/|subtitle/i.test(url)) {
+                Promise.resolve(p).then((r) => {
+                  try {
+                    r.clone().text().then((t) => {
+                      try {
+                        const j = JSON.parse(t);
+                        if (j && Array.isArray(j.body) && j.body.length) {
+                          window.__biliDigestCaptured.push({ url: url, body: j.body, raw: j });
+                        }
+                      } catch (e2) {}
+                    }).catch(() => {});
+                  } catch (e2) {}
+                }).catch(() => {});
+              }
+              return p;
+            };
+          } catch (e) {}
+          try {
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function (m, u) { this.__biliUrl = u; return origOpen.apply(this, arguments); };
+            XMLHttpRequest.prototype.send = function () {
+              const url = this.__biliUrl || '';
+              const self = this;
+              if (url && /aisubtitle|\/bfs\/ai_subtitle\/|subtitle/i.test(url)) {
+                this.addEventListener('load', () => {
+                  try {
+                    const j = JSON.parse(self.responseText);
+                    if (j && Array.isArray(j.body) && j.body.length) {
+                      window.__biliDigestCaptured.push({ url: url, body: j.body, raw: j });
+                    }
+                  } catch (e2) {}
+                });
+              }
+              return origSend.apply(this, arguments);
+            };
+          } catch (e) {}
+          window.__biliDigestHookInstalled = true;
+        }
+
+        // 尝试开启 CC 字幕按钮，触发播放器去请求字幕 JSON
+        function tryEnableSubtitle() {
+          const sels = ['.bpx-player-ctrl-subtitle-btn', '.bilibili-player-video-subtitle-btn', '.bpx-player-ctrl-subtitle'];
+          for (const sel of sels) {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              const cls = ((btn.className || '') + ' ' + (btn.getAttribute ? (btn.getAttribute('data-state') || '') : '')).toLowerCase();
+              const on = /active|on/.test(cls);
+              if (!on) { try { btn.click(); } catch (e) {} return 'clicked'; }
+              return 'already-on';
+            }
+          }
+          return 'not-found';
+        }
+
         return (async () => {
-          const payload = { source: 'bili-digest-extract', subtitles: null, videoInfo: null, playinfo: null };
-          const deadline = Date.now() + 2500;
+          installHook();
+          window.__biliDigestCaptured = window.__biliDigestCaptured || [];
+          window.__biliDigestCaptured.length = 0; // 清空上次的残留
+          const payload = { source: 'bili-digest-extract', subtitles: null, videoInfo: null, playinfo: null, captured: null, diag: { hook: true, ccAction: 'pending' } };
+          const deadline = Date.now() + 5000;
+          let ccAction = 'pending';
           while (Date.now() < deadline) {
             // 1) window.__playinfo__ — 尝试多种字幕路径
             try {
@@ -146,8 +216,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               } catch (e) {}
             }
 
-            if (payload.playinfo || payload.videoInfo) break;
-            await wait(200);
+            // 4) 播放器 fetch/XHR hook 捕获到的字幕正文（最可靠来源）
+            try {
+              if (window.__biliDigestCaptured && window.__biliDigestCaptured.length) {
+                payload.captured = window.__biliDigestCaptured;
+              }
+            } catch (e) {}
+
+            // 还没拿到字幕时，尝试开启 CC 字幕，触发播放器请求字幕 JSON
+            if ((!payload.subtitles || !payload.captured) && ccAction === 'pending') {
+              ccAction = tryEnableSubtitle();
+              payload.diag.ccAction = ccAction;
+            }
+
+            if ((payload.captured && payload.captured.length) || (payload.subtitles && payload.subtitles.length)) break;
+            await wait(300);
           }
 
           // 若 playinfo 含循环引用/不可序列化对象，回退到只返回字幕列表

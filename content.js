@@ -306,6 +306,30 @@
     let subtitle = null;
     const errors = [];
 
+    // 方法 0：播放器 fetch/XHR hook 直接抓到的字幕正文（最可靠，无需再下载文件）
+    if (pageData && pageData.captured && pageData.captured.length) {
+      log('字幕来源: 播放器实时抓取(fetch hook)');
+      try {
+        const rankCap = (c) => {
+          const u = (c.url || '').toLowerCase();
+          let s = c.body ? c.body.length : 0;
+          if (/zh|cn|chinese/i.test(u)) s += 100000;
+          return s;
+        };
+        const cap = pageData.captured.slice().sort((a, b) => rankCap(b) - rankCap(a))[0];
+        const body = (cap.body || [])
+          .map((l) => ({ from: Number(l.from) || 0, to: Number(l.to) || 0, content: String(l.content || '').trim() }))
+          .filter((l) => l.content);
+        if (body.length) {
+          subtitle = { lan: 'ai-zh', lanDoc: '中文(播放器抓取)', ai: true, body: body, source: 'hook' };
+          log('字幕加载成功 (fetch hook):', body.length, '段');
+        }
+      } catch (e) {
+        errors.push('播放器抓取: ' + e.message);
+        log('播放器抓取失败:', e.message);
+      }
+    }
+
     // 方法 1：从页面内嵌数据获取字幕列表
     if (pageData && pageData.subtitles && pageData.subtitles.length) {
       log('字幕来源: 页面内嵌 __playinfo__');
@@ -383,7 +407,14 @@
       subtitle = { error: errDetail, body: [] };
     }
 
-    return { ok: true, video: video, subtitle: subtitle };
+    const diag = {
+      pageSubtitles: (pageData && pageData.subtitles) ? pageData.subtitles.length : -1,
+      captured: (pageData && pageData.captured) ? pageData.captured.length : -1,
+      ccAction: (pageData && pageData.diag && pageData.diag.ccAction) || 'n/a',
+      methods: ['hook', 'playinfo', 'api', 'playinfo-backup']
+    };
+
+    return { ok: true, video: video, subtitle: subtitle, diag: diag };
   }
 
   /* =========================================================

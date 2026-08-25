@@ -79,6 +79,7 @@
       if (!res || !res.ok) throw new Error((res && res.error) || '获取视频数据失败');
       state.video = res.video;
       state.subtitle = res.subtitle || null;
+      state.diag = res.diag || null;
       state.isZh = !!(state.subtitle && state.subtitle.lan && (state.subtitle.lan.startsWith('zh') || state.subtitle.lan === 'ai-zh'));
       buildSegments();
       renderVideoCard();
@@ -172,6 +173,34 @@
       detail.style.opacity = '0.85';
       wrap.appendChild(title);
       wrap.appendChild(detail);
+
+      // 诊断信息（便于排查）
+      if (state.diag) {
+        const diagText = [
+          '页面内嵌字幕数: ' + state.diag.pageSubtitles,
+          '播放器实时抓取数: ' + state.diag.captured,
+          'CC 触发结果: ' + state.diag.ccAction
+        ].join('\n');
+        const pre = el('pre', 'diag-box', diagText);
+        pre.style.marginTop = '12px';
+        pre.style.whiteSpace = 'pre-wrap';
+        pre.style.fontSize = '12px';
+        pre.style.background = 'rgba(0,0,0,0.04)';
+        pre.style.padding = '8px 10px';
+        pre.style.borderRadius = '6px';
+        wrap.appendChild(pre);
+
+        const copyBtn = el('button', 'btn', '📋 复制诊断信息');
+        copyBtn.style.marginTop = '10px';
+        copyBtn.addEventListener('click', () => {
+          navigator.clipboard.writeText(diagText).then(() => {
+            copyBtn.textContent = '✅ 已复制';
+            setTimeout(() => { copyBtn.textContent = '📋 复制诊断信息'; }, 1500);
+          });
+        });
+        wrap.appendChild(copyBtn);
+      }
+
       const btn = el('button', 'btn primary', '🎙 本地语音转写（无需字幕）');
       btn.style.marginTop = '14px';
       btn.addEventListener('click', startTranscribe);

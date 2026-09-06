@@ -6,6 +6,16 @@
 
   const $ = (sel) => document.querySelector(sel);
 
+  const EXT_VERSION = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
+  (function showVersion() {
+    const fill = () => {
+      const vEl = document.getElementById('ext-version');
+      if (vEl) vEl.textContent = 'v' + EXT_VERSION;
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fill);
+    else fill();
+  })();
+
   const state = {
     tab: null,            // 当前浏览器标签
     video: null,          // 视频信息
@@ -179,8 +189,18 @@
         const diagText = [
           '页面内嵌字幕数: ' + state.diag.pageSubtitles,
           '播放器实时抓取数: ' + state.diag.captured,
-          'CC 触发结果: ' + state.diag.ccAction
-        ].join('\n');
+          'CC 触发结果: ' + state.diag.ccAction,
+          (state.diag.ccBtnClass ? ('CC 按钮类名: ' + state.diag.ccBtnClass) : 'CC 按钮类名: (未找到)'),
+          'API 直连: ' + (state.diag.apiTry
+            ? (state.diag.apiTry.ok
+                ? ('成功 ' + (state.diag.apiTry.got || 0) + ' 条')
+                : ('失败(' + (state.diag.apiTry.stage || ('code ' + state.diag.apiTry.code)) +
+                    (state.diag.apiTry.count ? (' / 列表' + state.diag.apiTry.count + '条') : '') +
+                    (state.diag.apiTry.dlError ? (' / ' + state.diag.apiTry.dlError) : '') + ')'))
+            : '未执行'),
+          (state.diag.viewApi ? ('videoInfo 兜底(view接口): ' + state.diag.viewApi) : null),
+          (state.diag.extractError ? ('⚠️ 提取异常: ' + state.diag.extractError) : null)
+        ].filter(Boolean).join('\n');
         const pre = el('pre', 'diag-box', diagText);
         pre.style.marginTop = '12px';
         pre.style.whiteSpace = 'pre-wrap';
@@ -452,7 +472,7 @@
     }
   }
 
-  function parseOverviewJson(raw) {
+  function parseOverviewJson(raw, res) {
     try {
       return JSON.parse(raw);
     } catch (e) {
@@ -463,9 +483,11 @@
         try { return JSON.parse(raw.slice(start, end + 1)); } catch (e2) { /* fallthrough */ }
       }
       console.error('[B站深度阅读] JSON 解析失败，原始响应前500字:', raw.slice(0, 500));
-      // 常见原因：max_tokens 截断导致 JSON 不完整
+      // 常见原因：max_tokens 截断 / 接口返回错误体 / 余额不足
       if (raw.length < 200) {
-        throw new Error('AI 返回内容过短，可能是 API Key 额度不足或网络异常，请检查设置');
+        const meta = res ? ('HTTP ' + (res.httpStatus || '?') + (res.viaRelay ? ' · 经后台中继' : '') + ' · 模型 ' + (res.model || '?')) : '';
+        const preview = raw ? (' · 原始响应: ' + raw.slice(0, 220)) : ' · 原始响应为空';
+        throw new Error('AI 返回内容过短（' + meta + '），可能是 API Key 额度不足或网络异常，请检查设置。' + preview);
       }
       throw new Error('AI 返回的 JSON 不完整（可能因内容过长被截断），请尝试对较短的视频生成概览');
     }

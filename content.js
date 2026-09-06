@@ -296,6 +296,7 @@
       }
     } catch (e) {
       log('页面内嵌数据提取失败:', e.message);
+      pageData = { __extractError: e.message };
     }
 
     // 获取视频信息
@@ -349,28 +350,8 @@
       }
     }
 
-    // 方法 2：通过 API 获取字幕列表
-    if (!subtitle) {
-      log('尝试通过 API 获取字幕...');
-      try {
-        const subs = await getSubtitleListViaApi(bvid, video.cid, video.aid);
-        log('API 返回字幕列表:', subs.length, '条');
-        const sub = pickSubtitle(subs);
-        if (sub) {
-          const j = await fetchSubtitleJson(sub);
-          const body = (j.body || [])
-            .map((l) => ({ from: l.from, to: l.to, content: String(l.content || '').trim() }))
-            .filter((l) => l.content);
-          subtitle = { lan: sub.lan || '', lanDoc: sub.lan_doc || '', ai: !!sub.ai_status, body: body };
-          log('字幕加载成功 (API):', subtitle.lan, body.length, '段');
-        } else if (subs.length === 0) {
-          errors.push('B站 API 未返回字幕。可能原因：1) 该视频未开启字幕；2) 你未登录 B站账号（B站已要求登录才能读取字幕列表）；3) 当前账号无该视频观看权限。可尝试点击「本地语音转写」。');
-        }
-      } catch (e) {
-        errors.push('API 字幕: ' + e.message);
-        log('API 字幕获取失败:', e.message);
-      }
-    }
+    // 方法 2 已由 background MAIN world 的 tryApiSubtitles 完成（结果在 captured 中 via:'api'，
+    // 由方法 0 优先使用）。content world 不再单独调 API，避免 md5/WBI 依赖与 Referer 限制问题。
 
     // 方法 3：直接从 __playinfo__ 里找（如果前面没提取到字幕列表但有完整 playinfo）
     if (!subtitle && pageData && pageData.playinfo) {
@@ -411,7 +392,11 @@
       pageSubtitles: (pageData && pageData.subtitles) ? pageData.subtitles.length : -1,
       captured: (pageData && pageData.captured) ? pageData.captured.length : -1,
       ccAction: (pageData && pageData.diag && pageData.diag.ccAction) || 'n/a',
-      methods: ['hook', 'playinfo', 'api', 'playinfo-backup']
+      ccBtnClass: (pageData && pageData.diag && pageData.diag.ccBtnClass) || null,
+      apiTry: (pageData && pageData.diag && pageData.diag.apiTry) || null,
+      viewApi: (pageData && pageData.diag && pageData.diag.viewApi) || null,
+      extractError: (pageData && pageData.__extractError) || (pageData && pageData.diag && pageData.diag.extractError) || null,
+      methods: ['hook', 'playinfo', 'api-mainworld', 'playinfo-backup']
     };
 
     return { ok: true, video: video, subtitle: subtitle, diag: diag };

@@ -147,6 +147,18 @@ async function readSSE(resp, onChunk, onLog) {
       } catch (_) { /* 忽略心跳帧 / 不完整的 JSON 帧 */ }
     }
   }
+  // 兜底：某些网关/中转忽略 stream 参数，直接返回完整 JSON（无 data: 前缀）。
+  // 此时上面的 SSE 解析拿不到任何 content，full 为空，这里尝试整块解析以兼容。
+  if (!full && buffer.trim()) {
+    try {
+      const j = JSON.parse(buffer.trim());
+      if (j && j.choices && j.choices[0]) {
+        const msg = j.choices[0].message || {};
+        full = msg.content || '';
+        if (j.usage) usage = j.usage;
+      }
+    } catch (_) { /* 保持原样，交由上层报错 */ }
+  }
   return { text: full, usage: usage };
 }
 

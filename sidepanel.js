@@ -419,27 +419,118 @@
       // 长文稿放宽超时：每 1 万 token 输入多给 40s（生成更慢）
       const dynTimeout = Math.min(300, 120 + Math.ceil(text.length / 10000) * 40);
 
-      const res = await callDeepSeek(
+      /* 首帧保护：服务端若在 40s 内连一个 token 都没输出，多数网关会在 60s 切断连接，
+         表现为「HTTP 200 但返回 0 字」。这里主动中断后自动重试一次（并缩短输出长度）。 */
+      const FIRST_TOKEN_TIMEOUT = 40;
+
+      // 带一次自动重试的调用封装
+      async function ask(messages, opts, label) {
+        try {
+          return await callDeepSeek(messages, opts);
+        } catch (e) {
+          if (e && e.isFirstTokenTimeout) {
+            const retryTokens = Math.max(800, Math.round((opts.maxTokens || 2000) / 2));
+            addLog('⚠️ ' + label + '：' + e.message + '，自动重试（输出上限降至 ' + retryTokens + '）…', 'warn');
+            return await callDeepSeek(messages, Object.assign({}, opts, {
+              maxTokens: retryTokens,
+              firstTokenTimeout: FIRST_TOKEN_TIMEOUT + 15
+            }));
+          }
+          throw e;
+        }
+      }
+
+      const commonCb = {
+        onLog: addLog,
+        onChunk: (full) => {
+          diagPreview.textContent = full.length > 600 ? full.slice(0, 600) + '…（共 ' + full.length + ' 字）' : full;
+        },
+        onHttp: (code) => addLog('DeepSeek HTTP 状态码：' + code + (code === 200 ? '（成功）' : '（异常）'), code === 200 ? 'ok' : 'err')
+      };
+
+      /* ---------- 分段摘要（长文稿）----------
+       * 一次性投喂 8000+ 字且要求输出大段 JSON 时，服务端可能长时间无输出而被网关切断。
+       * 改为：先把文稿按段切小，逐段提取带时间戳的要点（每步输入/输出都很小、很快），
+       * 再把这些要点作为素材一次性汇总成最终 JSON 概览。
+       */
+      const CHUNK_THRESHOLD = 6000;  // 超过这个字数才分段
+      const CHUNK_SIZE = 3000;       // 每段目标字数
+      let overviewInput = text;
+      let usedChunking = false;
+      const usageAcc = [];
+
+      if (text.length > CHUNK_THRESHOLD) {
+        const lines = text.split('\n');
+        const chunks = [];
+        let buf = [];
+        let sz = 0;
+        for (const ln of lines) {
+          buf.push(ln);
+          sz += ln.length;
+          if (sz >= CHUNK_SIZE) { chunks.push(buf.join('\n')); buf = []; sz = 0; }
+        }
+        if (buf.length) chunks.push(buf.join('\n'));
+
+        addLog('文稿较长（' + text.length + ' 字），启用分段摘要：共 ' + chunks.length + ' 段', 'warn');
+        const parts = [];
+        for (let i = 0; i < chunks.length; i++) {
+          addLog('第 ' + (i + 1) + '/' + chunks.length + ' 段摘要中（' + chunks[i].length + ' 字）…');
+          const r = await ask(
+            [
+              { role: 'system', content: DIGEST_PROMPTS.chunkSystem },
+              { role: 'user', content: DIGEST_PROMPTS.chunkUser(chunks[i], i + 1, chunks.length) }
+            ],
+            Object.assign({
+              temperature: 0.3,
+              maxTokens: 1500,
+              timeout: 120,
+              firstTokenTimeout: FIRST_TOKEN_TIMEOUT
+            }, commonCb),
+            '第 ' + (i + 1) + ' 段'
+          );
+          parts.push(r.text);
+          if (r.usage) usageAcc.push(r.usage);
+          addLog('第 ' + (i + 1) + ' 段完成（' + r.text.length + ' 字）', 'ok');
+        }
+        overviewInput = parts.join('\n');
+        usedChunking = true;
+        addLog('分段摘要完成，汇总素材 ' + overviewInput.length + ' 字', 'ok');
+      }
+
+      const res = await ask(
         [
           { role: 'system', content: DIGEST_PROMPTS.overviewSystem },
-          { role: 'user', content: DIGEST_PROMPTS.overviewUser(text) }
+          {
+            role: 'user',
+            content: usedChunking
+              ? DIGEST_PROMPTS.overviewUserFromNotes(overviewInput)
+              : DIGEST_PROMPTS.overviewUser(overviewInput)
+          }
         ],
-        {
+        Object.assign({
           temperature: 0.4,
-          maxTokens: 8000,
+          // 概览 JSON 实际远用不到 8000 token；上限过大反而拖慢首 token 并易触发网关超时
+          maxTokens: usedChunking ? 3500 : 4000,
           timeout: dynTimeout,
-          response_format: { type: 'json_object' },
-          onLog: addLog,
-          onChunk: (full) => {
-            diagPreview.textContent = full.length > 600 ? full.slice(0, 600) + '…（共 ' + full.length + ' 字）' : full;
-          },
-          onHttp: (code) => addLog('DeepSeek HTTP 状态码：' + code + (code === 200 ? '（成功）' : '（异常）'), code === 200 ? 'ok' : 'err')
-        }
+          firstTokenTimeout: FIRST_TOKEN_TIMEOUT,
+          response_format: { type: 'json_object' }
+        }, commonCb),
+        '最终汇总'
       );
+      // 合并分段阶段的用量，便于费用估算反映真实总消耗
+      if (usedChunking && usageAcc.length) {
+        const merged = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+        for (const u of usageAcc.concat([res.usage].filter(Boolean))) {
+          merged.prompt_tokens += Number(u.prompt_tokens) || 0;
+          merged.completion_tokens += Number(u.completion_tokens) || 0;
+          merged.total_tokens += Number(u.total_tokens) || 0;
+        }
+        res.usage = merged;
+      }
       console.log('[B站深度阅读] 概览响应：', res.text.length, '字');
       addLog('请求成功，DeepSeek 返回 ' + res.text.length + ' 字', 'ok');
 
-      const obj = parseOverviewJson(res.text);
+      const obj = parseOverviewJson(res.text, res);
       state.overview = obj;
       await chrome.storage.local.set({ ['digest:overview:' + state.video.bvid]: obj });
       renderOverview();
@@ -486,7 +577,14 @@
       // 常见原因：max_tokens 截断 / 接口返回错误体 / 余额不足
       if (raw.length < 200) {
         const meta = res ? ('HTTP ' + (res.httpStatus || '?') + (res.viaRelay ? ' · 经后台中继' : '') + ' · 模型 ' + (res.model || '?')) : '';
-        const preview = raw ? (' · 原始响应: ' + raw.slice(0, 220)) : ' · 原始响应为空';
+        // 完全空响应：通常是服务端迟迟不输出、被网关（常见 60s）切断，而非额度问题
+        if (!raw || !raw.trim()) {
+          throw new Error('AI 返回内容为空（' + meta + '）。' +
+            '通常是请求过大或网络链路导致服务端长时间无输出、被网关切断。' +
+            '已内置首帧超时重试与长文稿分段摘要，可重试一次；' +
+            '若反复出现，请到设置里点「测试连接」确认 Key 与接口地址（baseUrl）是否正常。');
+        }
+        const preview = ' · 原始响应: ' + raw.slice(0, 220);
         throw new Error('AI 返回内容过短（' + meta + '），可能是 API Key 额度不足或网络异常，请检查设置。' + preview);
       }
       throw new Error('AI 返回的 JSON 不完整（可能因内容过长被截断），请尝试对较短的视频生成概览');

@@ -20,6 +20,10 @@ async function callDeepSeek(messages, opts = {}) {
   const RETIRED = ['deepseek-chat', 'deepseek-reasoner'];
   const effectiveModel = RETIRED.includes(s.model) ? 'deepseek-v4-flash' : (s.model || 'deepseek-v4-flash');
 
+  // 首帧超时（TTFB）：服务端若迟迟不吐首 token，多数网关会在 60s 切断连接导致拿到空响应。
+  // 这里主动在 firstTokenTimeout 秒时中断，交给上层重试/降级，避免白等一场。
+  const firstTokenTimeout = Number(opts.firstTokenTimeout) || 0;
+
   const onLog = typeof opts.onLog === 'function' ? opts.onLog : () => {};
   const onChunk = typeof opts.onChunk === 'function' ? opts.onChunk : () => {};
   const onHttp = typeof opts.onHttp === 'function' ? opts.onHttp : () => {};
@@ -66,7 +70,11 @@ async function callDeepSeek(messages, opts = {}) {
       }
       if (useStream && resp.body) {
         onLog('已收到响应（HTTP ' + resp.status + '），开始接收流式内容…');
-        return await readSSE(resp, onChunk, onLog);
+        if (firstTokenTimeout) onLog('首帧保护：若 ' + firstTokenTimeout + 's 内无内容将自动中断重试');
+        return await readSSE(resp, onChunk, onLog, {
+          firstTokenTimeout: firstTokenTimeout,
+          controller: controller
+        });
       }
       const text = await resp.text();
       onChunk(text, 1);
@@ -103,6 +111,9 @@ async function callDeepSeek(messages, opts = {}) {
     if (e.name === 'AbortError') {
       throw new Error('请求超时（' + timeoutSec + '秒），DeepSeek 未在限定时间内返回，请缩短视频或检查网络');
     }
+    // 首帧超时：服务端迟迟不输出内容，中继（非流式）大概率同样卡住，
+    // 直接上抛交由上层重试/降级，避免再白等一轮。
+    if (e && e.isFirstTokenTimeout) throw e;
     onLog('⚠️ 直连异常：' + e.message);
     // 仅网络错误才降级中继；HTTP 错误（Key 无效/余额不足等）直接抛出
     if (e.message && e.message.indexOf('HTTP ') === 0) throw e;
@@ -116,16 +127,42 @@ async function callDeepSeek(messages, opts = {}) {
   }
 }
 
-/* ---- 解析 SSE 流，逐块回调 onChunk(fullText, chunkCount)，并捕获 usage ---- */
-async function readSSE(resp, onChunk, onLog) {
+/* ---- 解析 SSE 流，逐块回调 onChunk(fullText, chunkCount)，并捕获 usage ----
+ * opts.firstTokenTimeout: 秒。若这么久还没收到第一个内容帧，主动中断（抛错），
+ *   交由上层重试或降级。用于规避网关 60s 无数据切断导致的"HTTP 200 但 0 字"。
+ * opts.controller: AbortController，供首帧超时时中断底层连接。
+ */
+async function readSSE(resp, onChunk, onLog, opts = {}) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
+  const firstTokenTimeout = Number(opts.firstTokenTimeout) || 0;
+  const controller = opts.controller || null;
   let buffer = '';
   let full = '';
   let chunkCount = 0;
   let usage = null;
+
+  // 带首帧超时的 read：仅在还没收到任何内容时启用
+  async function readOnce() {
+    if (!firstTokenTimeout || full.length > 0) return reader.read();
+    let timer = null;
+    const guard = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error('首帧超时：' + firstTokenTimeout + 's 内未收到任何内容');
+        err.isFirstTokenTimeout = true;
+        if (controller) { try { controller.abort(err); } catch (e) {} }
+        reject(err);
+      }, firstTokenTimeout * 1000);
+    });
+    try {
+      return await Promise.race([reader.read(), guard]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readOnce();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');

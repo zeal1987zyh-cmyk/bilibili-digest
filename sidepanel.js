@@ -367,6 +367,27 @@
       .join('\n');
   }
 
+  // 分段要点：优先按 JSON（{"points":[...]}）解析，取不到就按纯文本原样使用
+  function extractPoints(raw) {
+    if (!raw) return '';
+    const t = raw.trim();
+    if (!t) return '';
+    try {
+      const j = JSON.parse(t);
+      if (j && Array.isArray(j.points)) return j.points.join('\n');
+    } catch (e) { /* 非 JSON，按纯文本处理 */ }
+    try {
+      // 宽松提取：文本里可能混有前后说明
+      const s = t.indexOf('{');
+      const e2 = t.lastIndexOf('}');
+      if (s >= 0 && e2 > s) {
+        const j = JSON.parse(t.slice(s, e2 + 1));
+        if (j && Array.isArray(j.points)) return j.points.join('\n');
+      }
+    } catch (e) { /* 忽略 */ }
+    return t;
+  }
+
   async function generateOverview(force) {
     if (!state.segments.length) { toast('没有可用的文稿，无法生成概览'); return; }
     if (state.overview && !force) return;
@@ -482,17 +503,36 @@
             ],
             Object.assign({
               temperature: 0.3,
-              maxTokens: 1500,
+              // 若模型带思维链，输出额度会先被思考过程占用，给太少会导致正文 0 字
+              maxTokens: 4000,
               timeout: 120,
-              firstTokenTimeout: FIRST_TOKEN_TIMEOUT
+              firstTokenTimeout: FIRST_TOKEN_TIMEOUT,
+              response_format: { type: 'json_object' }
             }, commonCb),
             '第 ' + (i + 1) + ' 段'
           );
-          parts.push(r.text);
+          // 分段要点可能以 JSON 返回（{"points":[...]}），也可能是纯文本，两种都兼容
+          parts.push(extractPoints(r.text));
           if (r.usage) usageAcc.push(r.usage);
-          addLog('第 ' + (i + 1) + ' 段完成（' + r.text.length + ' 字）', 'ok');
+          if (!r.text.trim()) {
+            addLog('第 ' + (i + 1) + ' 段返回 0 字', 'err');
+            if (r.rawSample) addLog('原始响应采样：' + r.rawSample.slice(0, 300), 'err');
+            else if (r.reasoningLen) addLog('疑似仅返回思维链（' + r.reasoningLen + ' 字），未输出正文', 'err');
+          } else {
+            addLog('第 ' + (i + 1) + ' 段完成（' + r.text.length + ' 字）', 'ok');
+          }
         }
-        overviewInput = parts.join('\n');
+        // 所有分段都没拿到内容 → 直接中止，避免用空素材生成无意义概览
+        const nonEmpty = parts.filter((p) => p && p.trim());
+        if (!nonEmpty.length) {
+          throw new Error('分段摘要全部返回空内容，已中止。' +
+            '请查看上方「原始响应采样」定位原因（多为接口返回格式不兼容）；' +
+            '也可到设置里点「测试连接」确认模型与接口地址是否正常。');
+        }
+        if (nonEmpty.length < parts.length) {
+          addLog('⚠️ 有 ' + (parts.length - nonEmpty.length) + ' 段返回空，已用其余段落继续汇总', 'warn');
+        }
+        overviewInput = nonEmpty.join('\n');
         usedChunking = true;
         addLog('分段摘要完成，汇总素材 ' + overviewInput.length + ' 字', 'ok');
       }
@@ -509,8 +549,8 @@
         ],
         Object.assign({
           temperature: 0.4,
-          // 概览 JSON 实际远用不到 8000 token；上限过大反而拖慢首 token 并易触发网关超时
-          maxTokens: usedChunking ? 3500 : 4000,
+          // 兼顾带思维链的模型：额度需容纳"思考 + 正文"两部分
+          maxTokens: usedChunking ? 6000 : 8000,
           timeout: dynTimeout,
           firstTokenTimeout: FIRST_TOKEN_TIMEOUT,
           response_format: { type: 'json_object' }
@@ -529,6 +569,10 @@
       }
       console.log('[B站深度阅读] 概览响应：', res.text.length, '字');
       addLog('请求成功，DeepSeek 返回 ' + res.text.length + ' 字', 'ok');
+      if (!res.text.trim()) {
+        if (res.rawSample) addLog('原始响应采样：' + res.rawSample.slice(0, 600), 'err');
+        if (res.reasoningLen) addLog('疑似仅返回思维链（' + res.reasoningLen + ' 字），未输出正文', 'err');
+      }
 
       const obj = parseOverviewJson(res.text, res);
       state.overview = obj;

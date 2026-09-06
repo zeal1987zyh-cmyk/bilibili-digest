@@ -106,7 +106,14 @@ async function callDeepSeek(messages, opts = {}) {
     onLog('正在发送请求到 DeepSeek（直连）…');
     const r = await directFetch();
     onLog('✅ DeepSeek 处理完成，返回 ' + r.text.length + ' 字，耗时 ' + elapsed() + 's');
-    return { text: r.text, httpStatus: 200, model: effectiveModel, elapsedMs: Date.now() - t0, usage: r.usage || null };
+    // 0 字但服务端的确产生了 token：说明内容在流里但我们没解析出来，把线索透给上层
+    if (!r.text && r.usage && Number(r.usage.completion_tokens) > 0) {
+      onLog('⚠️ 服务端已产生 ' + r.usage.completion_tokens + ' 个输出 token，但本地解析到 0 字（疑似响应格式不兼容）', 'warn');
+    }
+    return {
+      text: r.text, httpStatus: 200, model: effectiveModel, elapsedMs: Date.now() - t0,
+      usage: r.usage || null, rawSample: r.rawSample || '', reasoningLen: r.reasoningLen || 0
+    };
   } catch (e) {
     if (e.name === 'AbortError') {
       throw new Error('请求超时（' + timeoutSec + '秒），DeepSeek 未在限定时间内返回，请缩短视频或检查网络');
@@ -127,6 +134,30 @@ async function callDeepSeek(messages, opts = {}) {
   }
 }
 
+/* ---- 从一帧 JSON 里取正文 ----------------------------------------
+ * 不同模型/网关的字段命名差异很大，这里做最大兼容：
+ *   - OpenAI/DeepSeek 标准： choices[].delta.content / choices[].message.content
+ *   - 推理类模型：          choices[].delta.reasoning_content（思维链，不算正文）
+ *   - 部分中转/兼容层：      choices[].text、顶层 content/text/response/output_text/answer
+ * 返回 { content, reasoning }
+ * ---------------------------------------------------------------- */
+function pickContent(j) {
+  if (!j || typeof j !== 'object') return { content: '', reasoning: '' };
+  const cArr = Array.isArray(j.choices) ? j.choices : null;
+  const c0 = cArr && cArr[0];
+  if (c0) {
+    const d = c0.delta || {};
+    const m = c0.message || {};
+    const content = d.content || m.content || c0.text || d.text || c0.content || '';
+    const reason = d.reasoning_content || m.reasoning_content || c0.reasoning_content || '';
+    if (content || reason) return { content: String(content || ''), reasoning: String(reason || '') };
+  }
+  // 没有 choices 结构的兼容层
+  const flat = j.content || j.text || j.response || j.output_text || j.answer || j.data || '';
+  if (flat && typeof flat === 'string') return { content: flat, reasoning: '' };
+  return { content: '', reasoning: '' };
+}
+
 /* ---- 解析 SSE 流，逐块回调 onChunk(fullText, chunkCount)，并捕获 usage ----
  * opts.firstTokenTimeout: 秒。若这么久还没收到第一个内容帧，主动中断（抛错），
  *   交由上层重试或降级。用于规避网关 60s 无数据切断导致的"HTTP 200 但 0 字"。
@@ -141,6 +172,8 @@ async function readSSE(resp, onChunk, onLog, opts = {}) {
   let full = '';
   let chunkCount = 0;
   let usage = null;
+  let raw = '';        // 原始响应采样（用于 0 字时定位真实格式）
+  let reasoning = '';  // 推理模型的思维链（不作为正文）
 
   // 带首帧超时的 read：仅在还没收到任何内容时启用
   async function readOnce() {
@@ -164,7 +197,9 @@ async function readSSE(resp, onChunk, onLog, opts = {}) {
   while (true) {
     const { done, value } = await readOnce();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    if (raw.length < 4000) raw += decoded; // 只留前 4000 字符，避免占内存
+    buffer += decoded;
     const lines = buffer.split('\n');
     buffer = lines.pop();
     for (const line of lines) {
@@ -175,12 +210,13 @@ async function readSSE(resp, onChunk, onLog, opts = {}) {
       try {
         const j = JSON.parse(data);
         if (j.usage) usage = j.usage; // 末帧带 usage（stream_options.include_usage=true）
-        const delta = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
-        if (delta) {
-          full += delta;
+        const picked = pickContent(j);
+        if (picked.content) {
+          full += picked.content;
           chunkCount++;
           onChunk(full, chunkCount);
         }
+        if (picked.reasoning) reasoning += picked.reasoning;
       } catch (_) { /* 忽略心跳帧 / 不完整的 JSON 帧 */ }
     }
   }
@@ -189,14 +225,19 @@ async function readSSE(resp, onChunk, onLog, opts = {}) {
   if (!full && buffer.trim()) {
     try {
       const j = JSON.parse(buffer.trim());
-      if (j && j.choices && j.choices[0]) {
-        const msg = j.choices[0].message || {};
-        full = msg.content || '';
-        if (j.usage) usage = j.usage;
-      }
+      const picked = pickContent(j);
+      full = picked.content || '';
+      if (!reasoning) reasoning = picked.reasoning || '';
+      if (j && j.usage) usage = j.usage;
     } catch (_) { /* 保持原样，交由上层报错 */ }
   }
-  return { text: full, usage: usage };
+  // 0 字时把原始响应采样带出去，便于定位是"模型没输出"还是"我们没解析对"
+  return {
+    text: full,
+    usage: usage,
+    rawSample: full ? '' : (raw || buffer || '').slice(0, 1200),
+    reasoningLen: reasoning.length
+  };
 }
 
 /* =========================================================

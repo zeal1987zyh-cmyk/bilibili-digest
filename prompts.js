@@ -1,10 +1,27 @@
 // prompts.js — 中文 AI 提示词模板
 
+// 时间字段的统一约束。maxSec 为视频总时长（秒），用于压制模型输出越界时间戳。
+function timeRules(maxSec) {
+  const base =
+    '时间字段要求：\n' +
+    '- start / end / time 必须是**数字秒数**（整数），不要写成 "12:34" 这种格式\n' +
+    '- 换算规则：[12:34] 表示 12 分 34 秒，等于 12×60+34 = 754 秒\n';
+  if (maxSec > 0) {
+    const mm = Math.floor(maxSec / 60);
+    const ss = maxSec % 60;
+    return base +
+      '- 本视频总时长约 ' + maxSec + ' 秒（约 ' + mm + ' 分 ' + ss + ' 秒）\n' +
+      '- **任何时间戳都不得大于 ' + maxSec + ' 秒**，大于即算错误\n' +
+      '- chapters 按时间递增、互不重叠，最后一章的 end 应接近总时长\n';
+  }
+  return base + '- 时间戳必须是非负整数，chapters 按时间递增排列\n';
+}
+
 const DIGEST_PROMPTS = {
   overviewSystem:
     '你是一位资深知识提炼助手。用户会给你一段视频字幕文稿，请用简体中文提炼结构化内容，帮助用户快速掌握视频核心价值。',
 
-  overviewUser: (text) =>
+  overviewUser: (text, maxSec) =>
     '请分析下面的视频文稿，并输出严格的 JSON 对象（不要输出 JSON 以外的任何内容），字段如下：\n' +
     '{\n' +
     '  "summary": "一句话概括视频主旨，不超过 60 字",\n' +
@@ -12,7 +29,7 @@ const DIGEST_PROMPTS = {
     '  "chapters": [{"title": "章节标题", "start": 起始秒数, "end": 结束秒数, "points": ["该章节要点"]}]（按时间顺序覆盖全文）,\n' +
     '  "quotes": [{"time": 秒数, "text": "值得记住的原话，不超过 60 字"}]\n' +
     '}\n' +
-    '要求：chapters 的 start/end 必须是数字秒数；quotes 的 time 必须是数字秒数。\n\n' +
+    timeRules(maxSec) + '\n' +
     '文稿如下：\n' +
     text,
 
@@ -25,15 +42,16 @@ const DIGEST_PROMPTS = {
   chunkUser: (text, idx, total) =>
     '下面是视频文稿的第 ' + idx + '/' + total + ' 部分。请提取这部分的核心内容，' +
     '输出严格的 JSON 对象（不要输出 JSON 以外的任何内容），格式如下：\n' +
-    '{"points": ["[起始秒数] 要点内容", "[起始秒数] 要点内容", ...]}\n' +
+    '{"points": ["[12:34] 要点内容", "[15:02] 要点内容", ...]}\n' +
     '要求：\n' +
-    '1) 每条要点以 [起始秒数] 开头，例如 "[123] 讲了什么"，秒数取该要点对应内容出现的时间\n' +
+    '1) 每条要点开头的时间标记，必须**原样照抄**文稿中该要点对应内容所在那一行的方括号标记\n' +
+    '   （形如 [12:34]，分:秒）。严禁自己换算成秒数，严禁推算或杜撰时间\n' +
     '2) 共 5~12 条，每条不超过 60 字\n' +
     '3) 保留关键数据、结论、人名、术语、时间节点；不要写"本部分介绍了"这类套话\n\n' +
     '文稿片段：\n' + text,
 
   // 长文稿分段摘要（第二阶段）：基于各段要点汇总出最终结构化概览
-  overviewUserFromNotes: (notes) =>
+  overviewUserFromNotes: (notes, maxSec) =>
     '下面是这个视频的**分段要点摘录**（每条开头的方括号内是起始秒数）。请基于这些要点，' +
     '输出严格的 JSON 对象（不要输出 JSON 以外的任何内容），字段如下：\n' +
     '{\n' +
@@ -42,8 +60,9 @@ const DIGEST_PROMPTS = {
     '  "chapters": [{"title": "章节标题", "start": 起始秒数, "end": 结束秒数, "points": ["该章节要点"]}]（按时间顺序覆盖全文）,\n' +
     '  "quotes": [{"time": 秒数, "text": "值得记住的原话，不超过 60 字"}]\n' +
     '}\n' +
-    '要求：chapters 的 start/end 必须是数字秒数；quotes 的 time 必须是数字秒数；' +
-    '时间戳直接引用要点中给出的秒数，不要凭空编造。\n\n' +
+    timeRules(maxSec) + '\n' +
+    '时间戳必须来自要点里给出的时间标记（换算成秒），不要凭空编造；' +
+    '也不要为了让章节等长而自行拉长或偏移时间。\n\n' +
     '分段要点如下：\n' +
     notes,
 

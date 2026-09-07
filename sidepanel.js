@@ -537,14 +537,20 @@
         addLog('分段摘要完成，汇总素材 ' + overviewInput.length + ' 字', 'ok');
       }
 
+      // 视频总时长：既用于约束模型输出，也用于事后校正越界时间戳
+      const maxSec = getVideoDuration();
+      if (maxSec > 0) {
+        addLog('视频总时长 ' + fmtTime(maxSec) + '（' + maxSec + ' 秒），已约束时间戳不得越界');
+      }
+
       const res = await ask(
         [
           { role: 'system', content: DIGEST_PROMPTS.overviewSystem },
           {
             role: 'user',
             content: usedChunking
-              ? DIGEST_PROMPTS.overviewUserFromNotes(overviewInput)
-              : DIGEST_PROMPTS.overviewUser(overviewInput)
+              ? DIGEST_PROMPTS.overviewUserFromNotes(overviewInput, maxSec)
+              : DIGEST_PROMPTS.overviewUser(overviewInput, maxSec)
           }
         ],
         Object.assign({
@@ -588,6 +594,17 @@
         throw new Error('AI 返回的内容不是预期的概览结构（缺少 summary / keyPoints / chapters）。' +
           '当前模型会先输出长思维链，容易占满输出额度导致正文缺失，可重试一次。');
       }
+      // 时间戳校正：确保没有任何章节/金句超出视频总时长
+      const fix = sanitizeOverview(obj, maxSec);
+      if (fix) {
+        const parts = [];
+        if (fix.recoded) parts.push(fix.recoded + ' 个时间戳由 mmss 还原为 mm:ss');
+        if (fix.scaled) parts.push('整体时间轴已按比例缩放');
+        if (fix.clamped) parts.push(fix.clamped + ' 个时间戳被钳制到总时长内');
+        if (fix.swapped) parts.push(fix.swapped + ' 个章节首尾倒置已修正');
+        if (parts.length) addLog('⚠️ 时间戳校正：' + parts.join('；'), 'warn');
+      }
+
       state.overview = obj;
       await chrome.storage.local.set({ ['digest:overview:' + state.video.bvid]: obj });
       renderOverview();
@@ -646,6 +663,125 @@
       }
       throw new Error('AI 返回的 JSON 不完整（可能因内容过长被截断），请尝试对较短的视频生成概览');
     }
+  }
+
+  /* ---------- 概览时间戳校正 ----------
+   * 模型常把 mm:ss 换算错、或自行推算章节结束时间，导致出现超过视频总时长的时间戳
+   * （如 22 分钟的视频里冒出 28:43）。这里做最后的强制校正，保证渲染出来一定合法。
+   */
+  function toIntSec(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.round(n)) : null;
+  }
+
+  /* 修正形如「mm:ss 被写成 mmss」的时间戳。
+   * 文稿里的时间标记是 [17:23]，模型若漏做换算会直接输出 1723，
+   * 渲染时变成 28:43，看起来就像超过了视频总时长。这里把它还原成 17*60+23 = 1043 秒。
+   * 仅在还原后的值落在有效区间内才采纳，避免误伤正常秒数。
+   */
+  function fixTimeCode(v, maxSec) {
+    if (!(maxSec > 0) || v <= maxSec || v < 100) return v;
+    // mmss → mm*60 + ss
+    const mm = Math.floor(v / 100);
+    const ss = v % 100;
+    if (ss < 60) {
+      const c = mm * 60 + ss;
+      if (c > 0 && c <= maxSec) return c;
+    }
+    // hmmss → h*3600 + mm*60 + ss
+    if (v >= 10000) {
+      const h = Math.floor(v / 10000);
+      const rest = v % 10000;
+      const m2 = Math.floor(rest / 100);
+      const s2 = rest % 100;
+      if (m2 < 60 && s2 < 60) {
+        const c = h * 3600 + m2 * 60 + s2;
+        if (c > 0 && c <= maxSec) return c;
+      }
+    }
+    return v;
+  }
+
+  function getVideoDuration() {
+    let d = Number(state.video && state.video.duration) || 0;
+    if (state.segments.length) {
+      const last = state.segments[state.segments.length - 1].start;
+      if (Number.isFinite(last) && last > d) d = last;
+    }
+    return d > 0 ? Math.round(d) : 0;
+  }
+
+  function sanitizeOverview(obj, maxSec) {
+    const stat = { clamped: 0, swapped: 0, scaled: false, dropped: 0, recoded: 0 };
+    if (!obj || typeof obj !== 'object') return stat;
+
+    // 章节
+    const chs = Array.isArray(obj.chapters) ? obj.chapters.filter((c) => c && typeof c === 'object') : [];
+    stat.dropped += (Array.isArray(obj.chapters) ? obj.chapters.length : 0) - chs.length;
+
+    let maxEnd = 0;
+    for (const ch of chs) {
+      let s = toIntSec(ch.start);
+      let e = toIntSec(ch.end);
+      if (s === null) s = 0;
+      if (e === null) e = s;
+      if (e < s) { const t = s; s = e; e = t; stat.swapped++; }
+      // 先尝试还原「mm:ss 写成 mmss」的情形，还原成功就不必缩放/钳制
+      if (maxSec > 0) {
+        const fs = fixTimeCode(s, maxSec);
+        const fe = fixTimeCode(e, maxSec);
+        if (fs !== s) stat.recoded++;
+        if (fe !== e) stat.recoded++;
+        s = fs;
+        e = fe;
+        if (e < s) { const t = s; s = e; e = t; stat.swapped++; }
+      }
+      maxEnd = Math.max(maxEnd, e);
+      ch.start = s;
+      ch.end = e;
+    }
+
+    // 整体时间轴明显超限 → 按比例缩放（保留相对顺序与间隔）
+    if (maxSec > 0 && maxEnd > maxSec && chs.length) {
+      const over = chs.filter((c) => c.end > maxSec || c.start > maxSec).length;
+      if (over > chs.length / 2) {
+        const k = maxSec / maxEnd;
+        for (const ch of chs) {
+          ch.start = Math.round(ch.start * k);
+          ch.end = Math.round(ch.end * k);
+        }
+        stat.scaled = true;
+      }
+      // 其余情况（个别越界）只做钳制
+      for (const ch of chs) {
+        if (ch.start > maxSec) { ch.start = maxSec; stat.clamped++; }
+        if (ch.end > maxSec) { ch.end = maxSec; stat.clamped++; }
+        if (ch.end <= ch.start) ch.end = maxSec > 0 ? Math.min(maxSec, ch.start + 1) : ch.start + 1;
+      }
+    }
+
+    // 按开始时间排序，并保证章节起点不早于前一章起点（严格递增由渲染层容忍）
+    chs.sort((a, b) => a.start - b.start);
+    for (let i = 1; i < chs.length; i++) {
+      if (chs[i].start < chs[i - 1].start) chs[i].start = chs[i - 1].start;
+      if (chs[i].end < chs[i].start) chs[i].end = chs[i].start;
+    }
+    obj.chapters = chs;
+
+    // 金句时间戳
+    const qs = Array.isArray(obj.quotes) ? obj.quotes.filter((q) => q && typeof q === 'object') : [];
+    if (maxSec > 0) {
+      for (const q of qs) {
+        const raw = toIntSec(q.time);
+        if (raw === null) { q.time = 0; continue; }
+        const fixed = fixTimeCode(raw, maxSec);
+        if (fixed !== raw) stat.recoded++;
+        if (fixed > maxSec) { q.time = maxSec; stat.clamped++; } else { q.time = fixed; }
+      }
+    }
+    obj.quotes = qs;
+
+    return stat;
   }
 
   async function loadCachedOverview() {

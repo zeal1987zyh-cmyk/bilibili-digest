@@ -504,7 +504,7 @@
             Object.assign({
               temperature: 0.3,
               // 若模型带思维链，输出额度会先被思考过程占用，给太少会导致正文 0 字
-              maxTokens: 4000,
+              maxTokens: 6000,
               timeout: 120,
               firstTokenTimeout: FIRST_TOKEN_TIMEOUT,
               response_format: { type: 'json_object' }
@@ -549,8 +549,9 @@
         ],
         Object.assign({
           temperature: 0.4,
-          // 兼顾带思维链的模型：额度需容纳"思考 + 正文"两部分
-          maxTokens: usedChunking ? 6000 : 8000,
+          // 兼顾带思维链的模型：实测该模型思维链可占 6000 token，
+          // 额度需容纳"思考 + 正文"两部分；不足时正文会完全输不出。
+          maxTokens: 12000,
           timeout: dynTimeout,
           firstTokenTimeout: FIRST_TOKEN_TIMEOUT,
           response_format: { type: 'json_object' }
@@ -569,12 +570,24 @@
       }
       console.log('[B站深度阅读] 概览响应：', res.text.length, '字');
       addLog('请求成功，DeepSeek 返回 ' + res.text.length + ' 字', 'ok');
+      if (res.rescuedFromReasoning) {
+        addLog('已从思维链中抢救出答案（模型未输出正文），正在校验结构…', 'warn');
+      }
       if (!res.text.trim()) {
         if (res.rawSample) addLog('原始响应采样：' + res.rawSample.slice(0, 600), 'err');
-        if (res.reasoningLen) addLog('疑似仅返回思维链（' + res.reasoningLen + ' 字），未输出正文', 'err');
+        if (res.reasoningLen) {
+          addLog('仅返回思维链（' + res.reasoningLen + ' 字），未输出正文，且未能从中提取到 JSON', 'err');
+          if (res.reasoningSample) addLog('思维链尾部：' + res.reasoningSample.slice(-200), 'err');
+        }
       }
 
       const obj = parseOverviewJson(res.text, res);
+      // 结构校验：抢救出来的可能是思维链里的其它 JSON，不能直接渲染
+      if (!obj || typeof obj !== 'object' ||
+          (typeof obj.summary !== 'string' && !Array.isArray(obj.keyPoints) && !Array.isArray(obj.chapters))) {
+        throw new Error('AI 返回的内容不是预期的概览结构（缺少 summary / keyPoints / chapters）。' +
+          '当前模型会先输出长思维链，容易占满输出额度导致正文缺失，可重试一次。');
+      }
       state.overview = obj;
       await chrome.storage.local.set({ ['digest:overview:' + state.video.bvid]: obj });
       renderOverview();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "B站深度阅读助手 (Bilibili Digest)",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "把 B 站视频变成深度学习资源：字幕文稿、AI 概览、时间戳笔记、双语对照、无字幕视频本地语音转写。",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],

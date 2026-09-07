@@ -106,13 +106,18 @@ async function callDeepSeek(messages, opts = {}) {
     onLog('正在发送请求到 DeepSeek（直连）…');
     const r = await directFetch();
     onLog('✅ DeepSeek 处理完成，返回 ' + r.text.length + ' 字，耗时 ' + elapsed() + 's');
-    // 0 字但服务端的确产生了 token：说明内容在流里但我们没解析出来，把线索透给上层
-    if (!r.text && r.usage && Number(r.usage.completion_tokens) > 0) {
-      onLog('⚠️ 服务端已产生 ' + r.usage.completion_tokens + ' 个输出 token，但本地解析到 0 字（疑似响应格式不兼容）', 'warn');
+    if (r.rescuedFromReasoning) {
+      onLog('ℹ️ 正文为空但检测到思维链，已从思考过程中抢救出答案（' + r.text.length + ' 字）', 'warn');
+    } else if (!r.text && r.usage && Number(r.usage.completion_tokens) > 0) {
+      // 0 字但服务端的确产生了 token：内容在流里但没落到 content 字段
+      onLog('⚠️ 服务端已产生 ' + r.usage.completion_tokens + ' 个输出 token，正文却为 0 字' +
+        (r.reasoningLen ? ('（思维链 ' + r.reasoningLen + ' 字，输出额度被思考过程占满）') : ''), 'warn');
     }
     return {
       text: r.text, httpStatus: 200, model: effectiveModel, elapsedMs: Date.now() - t0,
-      usage: r.usage || null, rawSample: r.rawSample || '', reasoningLen: r.reasoningLen || 0
+      usage: r.usage || null, rawSample: r.rawSample || '',
+      reasoningLen: r.reasoningLen || 0, reasoningSample: r.reasoningSample || '',
+      rescuedFromReasoning: !!r.rescuedFromReasoning
     };
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -156,6 +161,43 @@ function pickContent(j) {
   const flat = j.content || j.text || j.response || j.output_text || j.answer || j.data || '';
   if (flat && typeof flat === 'string') return { content: flat, reasoning: '' };
   return { content: '', reasoning: '' };
+}
+
+/* ---- 从思维链里抢救正文 ------------------------------------------
+ * 适用场景：带 reasoning_content 的模型，输出额度被思考过程占满，
+ *   导致 delta.content 始终为 null、正文 0 字（finish_reason=length）。
+ *   此时思维链末尾往往已经写出了接近成形的答案，这里尝试捞出最后一个完整 JSON。
+ * 返回提取到的 JSON 字符串，找不到则返回 ''。
+ * ---------------------------------------------------------------- */
+function extractLastJson(text) {
+  if (!text || typeof text !== 'string') return '';
+  let best = '';
+  let bestEnd = -1;
+  // 逐个 '{' 起点做括号配对，凡是能 JSON.parse 成功的都算候选；
+  // 取「结束位置最靠后」的那个——既能跳过残缺片段，也不会被嵌套的内层小对象抢先。
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '{') continue;
+    let depth = 0;
+    let end = -1;
+    for (let k = i; k < text.length; k++) {
+      const ch = text[k];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { end = k; break; }
+      }
+    }
+    if (end <= i) continue;
+    const cand = text.slice(i, end + 1);
+    try {
+      const j = JSON.parse(cand);
+      if (j && typeof j === 'object' && !Array.isArray(j) && end > bestEnd) {
+        best = cand;
+        bestEnd = end;
+      }
+    } catch (e) { /* 不是合法 JSON，跳过 */ }
+  }
+  return best;
 }
 
 /* ---- 解析 SSE 流，逐块回调 onChunk(fullText, chunkCount)，并捕获 usage ----
@@ -231,12 +273,22 @@ async function readSSE(resp, onChunk, onLog, opts = {}) {
       if (j && j.usage) usage = j.usage;
     } catch (_) { /* 保持原样，交由上层报错 */ }
   }
+  // 兜底：正文为空但思维链很长 → 说明输出额度被思考过程占满，
+  // 尝试从思维链末尾抢救出已经成形的 JSON 答案，避免整轮白跑。
+  let rescued = false;
+  if (!full && reasoning.length > 100) {
+    const ex = extractLastJson(reasoning);
+    if (ex) { full = ex; rescued = true; }
+  }
+
   // 0 字时把原始响应采样带出去，便于定位是"模型没输出"还是"我们没解析对"
   return {
     text: full,
     usage: usage,
     rawSample: full ? '' : (raw || buffer || '').slice(0, 1200),
-    reasoningLen: reasoning.length
+    reasoningLen: reasoning.length,
+    reasoningSample: rescued ? '' : reasoning.slice(-400), // 抢救失败时留尾部便于排查
+    rescuedFromReasoning: rescued
   };
 }
 
